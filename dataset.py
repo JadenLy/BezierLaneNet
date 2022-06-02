@@ -15,26 +15,22 @@ class BezierDataset(VisionDataset):
         self.sample_points = sample_points
         self.transforms = transforms
         self.root = root
-        self.image_path = image_set
+        self.image_set = image_set
         self.bezier_sampler = BezierSampler()
 
         # Read in data from folder 
-        if image_set == 'train':
-            with open(os.path.join(root, 'bezier_convert.json'), 'r') as f:
-                self.bezier_points = json.load(f)
-        else:
+        if image_set == 'test':
             self.bezier_points = {}
             with open(os.path.join(root, 'test_label.json'), 'r') as f:
                 data = [json.load(line) for line in f.readlines()]
-                for image in data:
-                    new_points = []
-                    for lane in image['lanes']:
-                        x = np.array(lane)
-                        y = np.array(image['h_samples'])[x != -2].tolist()
-                        if len(y) == 0:
-                            continue
-                        x = x[x != -2].tolist()
-                    self.bezier_points[image['raw_file']] = new_points
+            for image in data:
+                self.bezier_points[image['raw_file']] = {}
+                self.bezier_points[image['raw_file']]['h_samples'] = image['h_samples']
+                self.bezier_points[image['raw_file']]['lanes'] = image['lanes']
+        else:
+             with open(os.path.join(root, 'bezier_convert.json'), 'r') as f:
+                self.bezier_points = json.load(f)
+            
 
         with open(os.path.join(root, f"{image_set}.txt"), "r") as f:
             contents = [x.strip().split(' ')[:2] for x in f.readlines()]
@@ -46,6 +42,9 @@ class BezierDataset(VisionDataset):
         image_file = self.image_files[index]
         # Get image
         img = Image.open(os.path.join(self.root, image_file))
+
+        if self.image_set == 'test':
+            return self.bezier_points[image_file]
 
         labels = {}
         

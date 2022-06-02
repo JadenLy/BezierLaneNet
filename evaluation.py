@@ -3,6 +3,7 @@ import torch
 from dataset import BezierDataset
 import transforms
 from util import dict_collate_fn
+from lane import LaneEval
 
 def evaluate():
 
@@ -21,9 +22,14 @@ def evaluate():
                                                 collate_fn=dict_collate_fn,
                                                 shuffle=False,
                                                 num_workers=2)
+    
+    bench_eval = LaneEval()
+
     # Run the output
-    for image in 
-    pred = model()
+    for image, labels in test_loader:
+        pred = model(image)
+        
+        bench_eval.bench(pred, gt, y_samples, running_time)
 
     # Calculate metrics
 

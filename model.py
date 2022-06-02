@@ -136,8 +136,10 @@ class DilatedBlock(nn.Module):
 
 
 class BenizerNet(nn.Module):
-    def __init__(self, image_height=360, global_stride=16, regression_target=8, final_channels=256, hidden_channels=64):
+    def __init__(self, image_height=360, global_stride=16, regression_target=8, final_channels=256, hidden_channels=64, thresh=0.5, local_maximum_window_size=9):
         super().__init__()
+        self.thresh = thresh
+        self.local_maximum_window_size = local_maximum_window_size
 
         # Pretrained Resnet
         self.resnet = resnet18(pretrained=True)
@@ -152,9 +154,7 @@ class BenizerNet(nn.Module):
         self.seg_head.append(Conv2DBlock(hidden_channels, 1, init_weight=True, bn=False, relu=False, padding=1))
 
         # Feature Flip Fusion
-        # TODO
         self.fff = FeatureFlipFusion(final_channels)
-
 
         self.aggregator = nn.AvgPool2d(kernel_size=((image_height - 1) // global_stride + 1, 1), stride=1, padding=0)
         self.regression_head = nn.ModuleList()
@@ -180,3 +180,12 @@ class BenizerNet(nn.Module):
         return [logits, curves, segmentations]
 
     
+    def infer(self, input):
+        pred = self.forward(input)
+        pred_conf = pred[0].sigmoid() 
+        pred_select = pred_conf > self.thresh
+
+        
+
+        pred_coordinates = {}
+        pred_coordinates['lanes'] = []

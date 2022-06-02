@@ -8,6 +8,7 @@ from model import BenizerNet
 from loss import HungarianBezierLoss
 import time
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 def save_model(model, epoch):
     model_dir = 'model'
@@ -35,6 +36,19 @@ def main():
                                                     sampler=torch.utils.data.RandomSampler(train_dataset),
                                                     num_workers=2)
     
+    # Load valid
+    val_transform = transforms.Compose([
+        transforms.Resize((360, 640), (360, 640), ignore_x=None), 
+        transforms.ToTensor(), 
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225], normalize_target=True, ignore_x=None)
+    ])
+    val_dataset = BezierDataset('data/train_set', 'val', transforms=val_transform)
+    val_size = len(val_dataset)
+    val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
+                                                batch_size=2,
+                                                collate_fn=dict_collate_fn,
+                                                shuffle=False,
+                                                num_workers=2)
 
     # Load model
     model = BenizerNet().to(device)
@@ -55,31 +69,59 @@ def main():
     optimizer = torch.optim.Adam(parameters, lr=0.0006)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, len(train_dataset) * num_epochs)
 
-    total_loss, curve_loss, classification_loss, segmentation_loss = [], [], [], []
-    
+    train_total_loss = []
+    val_total_loss, val_curve_loss, val_clas_loss, val_seg_loss = [], [], [], []
     print("Start training...")
 
     for epoch in range(num_epochs):
         time_now = time.time()
+        model.train()
+        total_loss = 0.0
         for input, label in tqdm(train_loader, total=train_size, desc=f"Training epoch {epoch}"):
             input, label = input.to(device), label.to(device)
             pred = model(input)
-            loss, log_data = criterion(pred, label)
-            loss.backward()
+            optimizer.zero_grad()
+            trainloss, train_log_data = criterion(pred, label)
+            trainloss.backward()
             optimizer.step()
             scheduler.step()
 
             # Record loss
-            total_loss.append(loss.item())
-            curve_loss.append(log_data['curve_loss'])
-            classification_loss.append(log_data['classification_loss'])
-            segmentation_loss.append(log_data['segmentation_loss'])
+            total_loss += trainloss.item()
+
+        total_loss = total_loss / train_size
+        train_total_loss.append(total_loss)
+
+        # Test on valid set
+        model.eval()
+        total_loss = 0.0
+        for image, labels in val_loader:
+            image, labels = image.to(device), label.to(device)
+            pred = model(image)
+            loss, log_data = criterion(pred, labels)
+            total_loss += loss.item()
+
+        total_loss = total_loss / val_size
+        val_total_loss.append(total_loss)
 
         # Save the model after each 10 epochs
         if epoch % 10 == 0:
             save_model(model, epoch)
 
-        print(f"Epoch {epoch} finished in {(time.time() - time_now)} with loss {loss.item()} curve loss {log_data['curve_loss']} classification loss {log_data['classification_loss']} segmentation loss {log_data['segmentation_loss']}")
+        print(f"Epoch {epoch} finished in {(time.time() - time_now)} with train loss {train_total_loss[-1]} valid loss {total_loss}")
+
+    # Plot loss
+    plt.plot(train_total_loss, label='train total')
+    plt.plot(val_curve_loss, label='val curve')
+    plt.plot(val_clas_loss, label='val classification')
+    plt.plot(val_seg_loss, label='val segmentation')
+    plt.plot(val_total_loss, label='val total')
+    plt.legend()
+    plt.title('Training loss plot')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+
+    print(f"Model Training finished")
 
 if __name__ == '__main__':
     main()
