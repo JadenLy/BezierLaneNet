@@ -8,7 +8,7 @@ from lane import LaneEval
 def evaluate():
 
     # Load the model
-    model = torch.load('model/model_400.pt')
+    model = torch.load('model/model_4.pt')
 
     # Load the test set
     test_transform = transforms.Compose([
@@ -18,20 +18,29 @@ def evaluate():
     ])
     test_dataset = BezierDataset('data/test_set', 'test', transforms=test_transform)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                                batch_size=2,
+                                                batch_size=1,
                                                 collate_fn=dict_collate_fn,
                                                 shuffle=False,
-                                                num_workers=2)
+                                                num_workers=4)
     
     bench_eval = LaneEval()
 
     # Run the output
+    accuracy, fp, fn = 0., 0., 0.
     for image, labels in test_loader:
-        pred = model(image)
+        pred = model.infer(image)
         
-        bench_eval.bench(pred, gt, y_samples, running_time)
+        a, p, n = bench_eval.bench(pred, labels['lanes'], labels['h_samples'], 0)
+
+        accuracy += a
+        fp += p
+        fn += n
 
     # Calculate metrics
+    test_size = len(test_dataset)
+
+    print(f'TuSimple eval: accuracy {accuracy / test_size:.2} fp {fp/test_size :.2} fn {fn/test_size:.2f}')
+
 
 
 

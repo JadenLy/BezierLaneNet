@@ -34,7 +34,7 @@ def main():
                                                     batch_size=10,
                                                     collate_fn=dict_collate_fn,
                                                     sampler=torch.utils.data.RandomSampler(train_dataset),
-                                                    num_workers=2)
+                                                    num_workers=1)
     
     # Load valid
     val_transform = transforms.Compose([
@@ -45,16 +45,16 @@ def main():
     val_dataset = BezierDataset('data/train_set', 'val', transforms=val_transform)
     val_size = len(val_dataset)
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
-                                                batch_size=2,
+                                                batch_size=1,
                                                 collate_fn=dict_collate_fn,
                                                 shuffle=False,
-                                                num_workers=2)
+                                                num_workers=1)
 
     # Load model
     model = BenizerNet().to(device)
 
     # Setup hyper parameters
-    num_epochs = 400
+    num_epochs = 4
     criterion = HungarianBezierLoss()
 
     # Change parameters  1/10 lr for deformable offsets,
@@ -77,17 +77,20 @@ def main():
         time_now = time.time()
         model.train()
         total_loss = 0.0
-        for input, label in tqdm(train_loader, total=train_size, desc=f"Training epoch {epoch}"):
-            input, label = input.to(device), label.to(device)
+        for index, (input, labels) in enumerate(train_loader):
+            input = input.to(device)
+            labels = [{k: v.to(device) for k, v in label.items()} for label in labels]
             pred = model(input)
             optimizer.zero_grad()
-            trainloss, train_log_data = criterion(pred, label)
+            trainloss, _ = criterion(pred, labels)
             trainloss.backward()
             optimizer.step()
             scheduler.step()
 
             # Record loss
             total_loss += trainloss.item()
+
+            print(f'Iteration {index} loss {trainloss.item()}')
 
         total_loss = total_loss / train_size
         train_total_loss.append(total_loss)

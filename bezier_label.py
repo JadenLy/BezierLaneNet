@@ -8,10 +8,6 @@ from tqdm import tqdm
 
 from util import BezierCurve
 
-IMAGE_HEIGHT=720
-IMAGE_WIDTH=1280
-
-
 def poly_fit():
     pass 
 

@@ -39,34 +39,85 @@ class BezierCurve(object):
         nPoints = len(x)
         t = np.linspace(0.0, 1.0, self.degree)
         
-        polynomial_array = np.array([self.bernstein_poly(i, self.degree-1, t) for i in range(0, self.degree)])
+        polynomial_array = np.array([self.bernstein_poly(i, nPoints-1, t) for i in range(0, nPoints)])
         
         xvals = np.dot(x, polynomial_array)
         yvals = np.dot(y, polynomial_array)
 
         return xvals, yvals
 
+    def quick_sample_point(self, control_points, image_size=None):
+        sample_points = self.c_matrix.dot(np.array(control_points))
+        if image_size is not None:
+            sample_points[:, 0] = sample_points[:, 0] * image_size[-1]
+            sample_points[:, -1] = sample_points[:, -1] * image_size[0]
+        return sample_points
+        
+    def bezier_to_coordinates(self, control_points, existence, resize_shape, bezier_curve, ppl=56, gap=10):
+        # control_points: L x N x 2
+        H, W = resize_shape
+        cps_of_lanes = [control_points[i].tolist() for i in range(len(existence)) if existence[i]]
+        for flag, cp in zip(existence, control_points):
+            if flag:
+                cps_of_lanes.append(cp.tolist())
+        coordinates = []
+        for cps_of_lane in cps_of_lanes:
+            self.assign_control_points(cps_of_lane)
+            # Find x for TuSimple's fixed y eval positions (suboptimal)
+            bezier_threshold = 5.0 / H
+            h_samples = np.array([1.0 - (ppl - i) * gap / H for i in range(ppl)], dtype=np.float32)
+            sampled_points = bezier_curve.quick_sample_point(cps_of_lane, image_size=None)
+            temp = []
+            dis = np.abs(np.expand_dims(h_samples, -1) - sampled_points[:, 1])
+            idx = np.argmin(dis, axis=-1)
+            for i in range(ppl):
+                h = H - (ppl - i) * gap
+                if dis[i][idx[i]] > bezier_threshold or sampled_points[idx[i]][0] > 1 or sampled_points[idx[i]][0] < 0:
+                    temp.append([-2, h])
+                else:
+                    temp.append([sampled_points[idx[i]][0] * W, h])
+            coordinates.append(temp)
 
+        return coordinates
 
 class BezierSampler(object):
-    def __init__(self, sample_points=100):
-        self.sample_points = sample_points
+    def __init__(self, num_points=100, degree=3):
+        self.num_points = num_points
+        self.degree = degree
+        self.bernstein_matrix = self.get_bernstein_matrix()
 
     """
     The Bernstein polynomial of n, i as a function of t
     """
-    def bernstein_poly(self, i, n, t):
-        return comb(n, i) * ( t**(n-i) ) * (1 - t)**i
+    def bernstein_poly(self, n, t, k):
+        return t ** k * (1 - t) ** (n - k) * comb(n, k)
+
+    def get_bezier_coefficient(self, t):
+        return [[self.bernstein_poly(self.degree, ti, k) for k in range(self.degree + 1)] for ti
+                                  in t]
+
+    def get_bernstein_matrix(self):
+        t = torch.linspace(0, 1, self.num_points)
+        c_matrix = torch.tensor(self.get_bezier_coefficient(t))
+        return c_matrix
 
     # Sample the points from the curve
     def sample_points(self, keypoints):
         if keypoints.numel() == 0:
             return keypoints
-        
-        t = np.linspace(0.0, 1.0, self.sample_points)
-        polynomial_array = np.array([self.bernstein_poly(i, self.sample_points - 1, t) for i in range(0, self.sample_points)])
 
-        return upcast(polynomial_array).matmul(upcast(keypoints))
+        return upcast(self.bernstein_matrix).matmul(upcast(keypoints))
+        """
+        
+        
+        n = len(keypoints)
+        t = np.linspace(0.0, 1.0, self.num_points)
+        polynomial_array = torch.from_numpy(np.array([[self.bernstein_poly(n - 1, ti, k) for k in range(n)] for ti in t])).float()
+        
+        
+        points = torch.matmul(polynomial_array, keypoints)
+        return points
+        """
 
 # Validate points
 @torch.no_grad()
