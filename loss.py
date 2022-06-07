@@ -20,8 +20,8 @@ class HungarianBezierLoss(nn.Module):
         self.reduction = reduction
         self.ignore_index = ignore_index
 
-        self.pos_weight = weight[1] / weight[0]
-        self.pos_weight_seg = weight_seg[1] / weight_seg[0]
+        self.pos_weight = torch.Tensor([weight[1] / weight[0]]).cuda()
+        self.pos_weight_seg = torch.Tensor([weight_seg[1] / weight_seg[0]]).cuda()
 
         self.bezier_sampler = BezierSampler(sample_points)
         self.hungarian_matcher = HungarianMatcher(degree, sample_points, alpha, k)
@@ -35,23 +35,19 @@ class HungarianBezierLoss(nn.Module):
         target_segmentations = torch.stack([target['segmentation_mask'] for target in targets])
 
         # Match the prediction and targets
-        indices = self.hungarian_matcher.match(prediction, targets)
+        indices = self.hungarian_matcher.match(prediction[0], prediction[1], targets)
         idx = self.hungarian_matcher.get_src_permutation_idx(indices)
         output_curves = output_curves[idx]
 
         # Targets (rearrange each lane in the whole batch)
-        # B x N x ... -> BN x ...
         target_keypoints = torch.cat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_sample_points = torch.cat([t['sample_points'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
         # Valid bezier segments
         target_keypoints = cubic_bezier_curve_segment(target_keypoints, target_sample_points)
-        target_sample_points = self.bezier_sampler.get_sample_points(target_keypoints)
+        target_sample_points = self.bezier_sampler.sample_points(target_keypoints)
 
         target_labels[idx] = 1
-        
-        
-
 
         # Calculate loss
         classification_loss = self.compute_classification_loss(prediction[0], target_labels)
@@ -63,15 +59,23 @@ class HungarianBezierLoss(nn.Module):
 
     def compute_curve_loss(self, pred, target):
         
-        return 
+        if target.numel() == 0:
+            target = pred.clone().detach()
+        loss = F.l1_loss(pred, target, reduction='none')
+        
+        normalizer = target.shape[0] * target.shape[1]
+        normalizer = torch.as_tensor([normalizer], dtype=pred.dtype, device=pred.device)
+
+        loss = loss.sum() / normalizer
+        
+        return loss
 
     def compute_classification_loss(self, pred, target):
         return F.binary_cross_entropy_with_logits(pred, target, pos_weight=self.pos_weight, reduction=self.reduction) / self.pos_weight
 
     def compute_segmentation_loss(self, pred, target):
         # Process inputs
-        pred = torch.nn.functional.interpolate(pred, size=targets.shape[-2:], mode='bilinear', align_corners=True)
-        pred = pred.squeeze(1)
+        pred = torch.nn.functional.interpolate(pred, size=target.shape[-2:], mode='bilinear', align_corners=True).squeeze(1)
 
         # Process targets
         valid_map = (targets != self.ignore_index)

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 def save_model(model, epoch):
     model_dir = 'model'
-    torch.save(model, os.path.join(model_dir, f'model_{epoch}.pt'))
+    torch.save(model.state_dict(), os.path.join(model_dir, f'model_{epoch}.pt'))
 
 def main():
 
@@ -31,7 +31,7 @@ def main():
     train_size = len(train_dataset)
     print(f"Finished loading training set with {train_size} samples")
     train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                                    batch_size=10,
+                                                    batch_size=30,
                                                     collate_fn=dict_collate_fn,
                                                     sampler=torch.utils.data.RandomSampler(train_dataset),
                                                     num_workers=1)
@@ -45,7 +45,7 @@ def main():
     val_dataset = BezierDataset('data/train_set', 'val', transforms=val_transform)
     val_size = len(val_dataset)
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset,
-                                                batch_size=1,
+                                                batch_size=30,
                                                 collate_fn=dict_collate_fn,
                                                 shuffle=False,
                                                 num_workers=1)
@@ -54,7 +54,7 @@ def main():
     model = BenizerNet().to(device)
 
     # Setup hyper parameters
-    num_epochs = 4
+    num_epochs = 20
     criterion = HungarianBezierLoss()
 
     # Change parameters  1/10 lr for deformable offsets,
@@ -99,7 +99,8 @@ def main():
         model.eval()
         total_loss = 0.0
         for image, labels in val_loader:
-            image, labels = image.to(device), label.to(device)
+            image = image.to(device)
+            labels = [{k: v.to(device) for k, v in label.items()} for label in labels]
             pred = model(image)
             loss, log_data = criterion(pred, labels)
             total_loss += loss.item()
@@ -111,19 +112,19 @@ def main():
         if epoch % 10 == 0:
             save_model(model, epoch)
 
-        print(f"Epoch {epoch} finished in {(time.time() - time_now)} with train loss {train_total_loss[-1]} valid loss {total_loss}")
+        print(f"Epoch {epoch} finished in {(time.time() - time_now):.2f} seconds with train loss {train_total_loss[-1]} valid loss {total_loss}")
 
+    save_model(model, epoch)
+    
     # Plot loss
     plt.plot(train_total_loss, label='train total')
-    plt.plot(val_curve_loss, label='val curve')
-    plt.plot(val_clas_loss, label='val classification')
-    plt.plot(val_seg_loss, label='val segmentation')
     plt.plot(val_total_loss, label='val total')
     plt.legend()
     plt.title('Training loss plot')
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
 
+    plt.savefig('loss.png')
     print(f"Model Training finished")
 
 if __name__ == '__main__':

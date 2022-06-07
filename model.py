@@ -5,7 +5,7 @@ from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops import deform_conv2d
 from torch.nn import functional as F
 import math
-from util import BezierCurve
+from util import BezierSampler
 
 """
 Base convolution layer module including option for dilated, batchnorm and ReLU
@@ -99,7 +99,7 @@ class FeatureFlipFusion(nn.Module):
         o1, o2, mask = torch.chunk(out, 3, dim=1)
         offset = torch.cat((o1, o2), dim=1) # 18 * 21 * 38
         mask = torch.sigmoid(mask) # 9 * 21 * 38
-        flip = deform_conv2d(flip, offset, self.weight, self.bias, mask=mask) # 256 * 21 * 38
+        flip = deform_conv2d(flip, offset, self.weight, self.bias, padding=1, mask=mask) # 256 * 21 * 38
 
         return F.relu(self.norm(flip) + x)
 
@@ -147,6 +147,7 @@ class BenizerNet(nn.Module):
     def __init__(self, image_height=360, global_stride=16, regression_target=8, final_channels=256, hidden_channels=64, thresh=0.5, local_maximum_window_size=9):
         super().__init__()
         self.thresh = thresh
+        self.image_height = image_height
         self.local_maximum_window_size = local_maximum_window_size
 
         # Pretrained Resnet
@@ -187,11 +188,13 @@ class BenizerNet(nn.Module):
             x = model(x)
 
         logits = self.proj_classification(x).squeeze(1)
-        curves = self.proj_regression(x)
+        curves = self.proj_regression(x).permute(0, 2, 1)
+        curves = curves.reshape(curves.shape[0], -1, curves.shape[-1] // 2, 2).contiguous()
 
         return [logits, curves, segmentations]
 
     # Run model inference to get x coordinates that match the h_samples from labeling
+    @torch.no_grad()
     def infer(self, input, max_lane=5, gap=10, points=56):
         pred = self.forward(input)
         pred_conf = pred[0].sigmoid() 
@@ -202,21 +205,19 @@ class BenizerNet(nn.Module):
                                                             padding=(self.local_maximum_window_size - 1) // 2,
                                                             return_indices=True)
         max_indices = max_indices.squeeze(1)  # B x Q
-        indices = torch.arange(0, pred_conf.shape[1], dtype=pred_conf.dtype).unsqueeze(0).expand_as(max_indices)
+        indices = torch.arange(0, pred_conf.shape[1], dtype=pred_conf.dtype).unsqueeze(0).expand_as(max_indices).cuda()
         local_maxima = max_indices == indices
         pred_select *= local_maxima
 
-        control_points = pred[1]
-
         pred_select, _ = lane_pruning(pred_select, pred_conf, max_lane=max_lane)
 
-        existence = existence.cpu().numpy()
-        control_points = control_points.cpu().numpy()
-        bezier = BezierCurve(order=3, num_sample_points=self.image_height)
+        pred_select = pred_select.cpu().numpy()
+        control_points = pred[1].cpu().numpy()
+        bezier = BezierSampler(degree=3, num_points=720)
 
         lane_coordinates = []
-        for j in range(existence.shape[0]):
-            lane_coordinates.append(bezier.bezier_to_coordinates(control_points=control_points[j], existence=existence[j],
-                                                               resize_shape=(360, 640), gap=gap, ppl=points))
+        for j in range(pred_select.shape[0]):
+            lane_coordinates.append(bezier.bezier_to_coordinates(control_points=control_points[j], existence=pred_select[j],
+                                                               resize_shape=(720, 1280), gap=gap, ppl=points))
 
         return lane_coordinates

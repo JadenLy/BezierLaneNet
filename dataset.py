@@ -22,11 +22,11 @@ class BezierDataset(VisionDataset):
         if image_set == 'test':
             self.bezier_points = {}
             with open(os.path.join(root, 'test_label.json'), 'r') as f:
-                data = [json.load(line) for line in f.readlines()]
-            for image in data:
-                self.bezier_points[image['raw_file']] = {}
-                self.bezier_points[image['raw_file']]['h_samples'] = image['h_samples']
-                self.bezier_points[image['raw_file']]['lanes'] = image['lanes']
+                for line in f:
+                    data = json.loads(line)
+                    self.bezier_points[data['raw_file']] = {}
+                    self.bezier_points[data['raw_file']]['h_samples'] = data['h_samples']
+                    self.bezier_points[data['raw_file']]['lanes'] = data['lanes']
         else:
              with open(os.path.join(root, 'bezier_convert.json'), 'r') as f:
                 self.bezier_points = json.load(f)
@@ -44,7 +44,9 @@ class BezierDataset(VisionDataset):
         img = Image.open(os.path.join(self.root, image_file))
 
         if self.image_set == 'test':
-            return self.bezier_points[image_file]
+            targets = ''
+            img, targets = self.transforms(img, targets)
+            return img, self.bezier_points[image_file]
 
         labels = {}
         
@@ -70,5 +72,8 @@ class BezierDataset(VisionDataset):
         return img, labels
 
     def __len__(self):
+        if self.image_set == 'test':
+            return len(self.bezier_points)
+
         return len(self.image_files)
 

@@ -46,39 +46,7 @@ class BezierCurve(object):
 
         return xvals, yvals
 
-    def quick_sample_point(self, control_points, image_size=None):
-        sample_points = self.c_matrix.dot(np.array(control_points))
-        if image_size is not None:
-            sample_points[:, 0] = sample_points[:, 0] * image_size[-1]
-            sample_points[:, -1] = sample_points[:, -1] * image_size[0]
-        return sample_points
-        
-    def bezier_to_coordinates(self, control_points, existence, resize_shape, bezier_curve, ppl=56, gap=10):
-        # control_points: L x N x 2
-        H, W = resize_shape
-        cps_of_lanes = [control_points[i].tolist() for i in range(len(existence)) if existence[i]]
-        for flag, cp in zip(existence, control_points):
-            if flag:
-                cps_of_lanes.append(cp.tolist())
-        coordinates = []
-        for cps_of_lane in cps_of_lanes:
-            self.assign_control_points(cps_of_lane)
-            # Find x for TuSimple's fixed y eval positions (suboptimal)
-            bezier_threshold = 5.0 / H
-            h_samples = np.array([1.0 - (ppl - i) * gap / H for i in range(ppl)], dtype=np.float32)
-            sampled_points = bezier_curve.quick_sample_point(cps_of_lane, image_size=None)
-            temp = []
-            dis = np.abs(np.expand_dims(h_samples, -1) - sampled_points[:, 1])
-            idx = np.argmin(dis, axis=-1)
-            for i in range(ppl):
-                h = H - (ppl - i) * gap
-                if dis[i][idx[i]] > bezier_threshold or sampled_points[idx[i]][0] > 1 or sampled_points[idx[i]][0] < 0:
-                    temp.append([-2, h])
-                else:
-                    temp.append([sampled_points[idx[i]][0] * W, h])
-            coordinates.append(temp)
-
-        return coordinates
+    
 
 class BezierSampler(object):
     def __init__(self, num_points=100, degree=3):
@@ -106,6 +74,9 @@ class BezierSampler(object):
         if keypoints.numel() == 0:
             return keypoints
 
+        if self.bernstein_matrix.device != keypoints.device:
+            self.bernstein_matrix = self.bernstein_matrix.to(keypoints.device)
+
         return upcast(self.bernstein_matrix).matmul(upcast(keypoints))
         """
         
@@ -118,6 +89,36 @@ class BezierSampler(object):
         points = torch.matmul(polynomial_array, keypoints)
         return points
         """
+
+    def quick_sample_point(self, control_points, image_size=None):
+        sample_points = self.bernstein_matrix.cpu().numpy().dot(np.array(control_points))
+        if image_size is not None:
+            sample_points[:, 0] = sample_points[:, 0] * image_size[-1]
+            sample_points[:, -1] = sample_points[:, -1] * image_size[0]
+        return sample_points
+        
+    def bezier_to_coordinates(self, control_points, existence, resize_shape, ppl=56, gap=10):
+        # control_points: L x N x 2
+        H, W = resize_shape
+        cps_of_lanes = [control_points[i].tolist() for i in range(len(existence)) if existence[i]]
+        coordinates = []
+        for cps_of_lane in cps_of_lanes:
+            # Find x for TuSimple's fixed y eval positions (suboptimal)
+            bezier_threshold = 5.0 / H
+            h_samples = np.array([1.0 - (ppl - i) * gap / H for i in range(ppl)], dtype=np.float32)
+            sampled_points = self.quick_sample_point(cps_of_lane, image_size=None)
+            temp = []
+            dis = np.abs(np.expand_dims(h_samples, -1) - sampled_points[:, 1])
+            idx = np.argmin(dis, axis=-1)
+            for i in range(ppl):
+                h = H - (ppl - i) * gap
+                if dis[i][idx[i]] > bezier_threshold or sampled_points[idx[i]][0] > 1 or sampled_points[idx[i]][0] < 0:
+                    temp.append([-2, h])
+                else:
+                    temp.append([sampled_points[idx[i]][0] * W, h])
+            coordinates.append(temp)
+
+        return coordinates
 
 # Validate points
 @torch.no_grad()
@@ -228,6 +229,7 @@ class HungarianMatcher(object):
         self.bezier_sampler = BezierSampler()
     
     # Match the $sampled_points$ points from pred to target
+    @torch.no_grad()
     def match(self, logits, curves, targets):
         B, Q = logits.shape
         target_keypoints = torch.cat([i['keypoints'] for i in targets], dim=0)  # G x N x 2
@@ -237,7 +239,7 @@ class HungarianMatcher(object):
         target_keypoints = cubic_bezier_curve_segment(target_keypoints, target_sample_points)
         target_sample_points = self.bezier_sampler.sample_points(target_keypoints)
 
-        G = target_keypoints.shape[:1]
+        G, _ = target_keypoints.shape[:2]
         out_prob = logits.sigmoid()  # B x Q
         out_lane = curves  # B x Q x N x 2
         sizes = [target['keypoints'].shape[0] for target in targets]
@@ -261,16 +263,16 @@ class HungarianMatcher(object):
         cost_label = out_prob.unsqueeze(-1).expand(-1, G)  # BQ x G
 
         # 3. Compute the curve sampling cost
-        cost_curve = 1 - torch.cdist(self.bezier_sampler.get_sample_points(out_lane).flatten(start_dim=-2),
+        cost_curve = 1 - torch.cdist(self.bezier_sampler.sample_points(out_lane).flatten(start_dim=-2),
                                      target_sample_points.flatten(start_dim=-2),
-                                     p=1) / self.num_sample_points  # BQ x G
+                                     p=1) / self.sampled_points  # BQ x G
 
         # Bound the cost to [0, 1]
         cost_curve = cost_curve.clamp(min=0, max=1)
 
         # Final cost matrix (scipy uses min instead of max)
         C = local_maxima * cost_label ** (1 - self.alpha) * cost_curve ** self.alpha
-        C = -C.view(B, Q, -1)
+        C = -C.view(B, Q, -1).cpu()
 
         # Hungarian (weighted) on each image
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
@@ -286,43 +288,3 @@ class HungarianMatcher(object):
         image_idx = torch.cat([src for (src, _) in indices])
 
         return batch_idx, image_idx
-
-@torch.no_grad()
-def cubic_bezier_curve_segment(control_points, sample_points):
-    # Cut a batch of cubic bezier curves to its in-image segments (assume at least 2 valid sample points per curve).
-    # Based on De Casteljau's algorithm, formula for cubic bezier curve is derived by:
-    # https://stackoverflow.com/a/11704152/15449902
-    # control_points: B x 4 x 2
-    # sample_points: B x N x 2
-    if control_points.numel() == 0 or sample_points.numel() == 0:
-        return control_points
-    B, N = sample_points.shape[:-1]
-    valid_points = get_valid_points(sample_points)  # B x N, bool
-    t = torch.linspace(0.0, 1.0, steps=N, dtype=sample_points.dtype, device=sample_points.device)
-
-    # First & Last valid index (B)
-    # Get unique values for deterministic behaviour on cuda:
-    # https://pytorch.org/docs/1.6.0/generated/torch.max.html?highlight=max#torch.max
-    t0 = t[(valid_points + torch.arange(N, device=valid_points.device).flip([0]) * valid_points).max(dim=-1).indices]
-    t1 = t[(valid_points + torch.arange(N, device=valid_points.device) * valid_points).max(dim=-1).indices]
-
-    # Generate transform matrix (old control points -> new control points = linear transform)
-    u0 = 1 - t0  # B
-    u1 = 1 - t1  # B
-    transform_matrix_c = [torch.stack([u0 ** (3 - i) * u1 ** i for i in range(4)], dim=-1),
-                          torch.stack([3 * t0 * u0 ** 2,
-                                       2 * t0 * u0 * u1 + u0 ** 2 * t1,
-                                       t0 * u1 ** 2 + 2 * u0 * u1 * t1,
-                                       3 * t1 * u1 ** 2], dim=-1),
-                          torch.stack([3 * t0 ** 2 * u0,
-                                       t0 ** 2 * u1 + 2 * t0 * t1 * u0,
-                                       2 * t0 * t1 * u1 + t1 ** 2 * u0,
-                                       3 * t1 ** 2 * u1], dim=-1),
-                          torch.stack([t0 ** (3 - i) * t1 ** i for i in range(4)], dim=-1)]
-    transform_matrix = torch.stack(transform_matrix_c, dim=-2).transpose(-2, -1)  # B x 4 x 4, f**k this!
-    transform_matrix = transform_matrix.unsqueeze(1).expand(B, 2, 4, 4)
-
-    # Matrix multiplication
-    res = transform_matrix.matmul(control_points.permute(0, 2, 1).unsqueeze(-1))  # B x 2 x 4 x 1
-
-    return res.squeeze(-1).permute(0, 2, 1)

@@ -1,0 +1,9 @@
+matplotlib
+torch
+torchvision
+tqdm
+numpy
+sklearn
+glob
+scipy
+
