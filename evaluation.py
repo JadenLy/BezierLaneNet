@@ -4,15 +4,21 @@ from dataset import BezierDataset
 import transforms
 from util import dict_collate_fn
 from lane import LaneEval
-from model import BenizerNet
+from model import BenizerNet, lane_pruning
 from collections import OrderedDict
 from tqdm import tqdm
+import os
+import warnings
+import cv2
+import numpy as np
+import pandas as pd
+warnings.filterwarnings('ignore', category=UserWarning)
 
 def evaluate():
 
     # Load the model
     model = BenizerNet().cuda()
-    checkpoint = torch.load('model/model_19.pt')
+    checkpoint = torch.load('model/best_model.pt')
     checkpoint = OrderedDict((k.replace('aux_head', 'lane_classifier') if 'aux_head' in k else k, v)
                                       for k, v in checkpoint.items())
     model.load_state_dict(checkpoint, strict=True)
@@ -35,22 +41,32 @@ def evaluate():
     bench_eval = LaneEval()
 
     # Run the output
-    accuracy, fp, fn = 0., 0., 0.
-    for image, labels in tqdm(test_loader, total=test_size, desc='Running evaluation'):
+    accuracy, fp, fn = [], [], []
+    for index, (image, labels) in tqdm(enumerate(test_loader), total=test_size, desc='Running evaluation'):
         image = image.to('cuda')
         labels = labels[0]
         pred = model.infer(image)[0]
-        pred = [[c[0] for c in lane] for lane in pred]
+        pred_widths = [[c[0] for c in lane] for lane in pred]
 
-        a, p, n = bench_eval.bench(pred, labels['lanes'], labels['h_samples'], 0)
+        a, p, n = bench_eval.bench(pred_widths, labels['lanes'], labels['h_samples'], 0)
 
-        accuracy += a
-        fp += p
-        fn += n
+        accuracy.append(a)
+        fp.append(p)
+        fn.append(n)
 
-    # Calculate metrics
+        # Visualize
+        image = cv2.imread(os.path.join('data/test_set', test_dataset.image_files[index]))
+        for lane in pred:
+            lane = np.array([pts for pts in lane if pts[0] != -2]).astype(np.int32).reshape((-1, 1, 2))
+            cv2.polylines(image, [lane], isClosed=False, color=(0, 0, 255), thickness=5)
 
-    print(f'TuSimple eval: accuracy {accuracy / test_size:.2} fp {fp/test_size :.2} fn {fn/test_size:.2f}')
+        cv2.imwrite(f"vis/{index}.jpg", image)
+
+    # Summarize
+
+    df = pd.DataFrame({"accuracy": accuracy, "fp": fp, "fn": fn})
+    df.to_csv('result.csv')
+    print(f'TuSimple eval: accuracy {np.mean(accuracy) * 100} fp {np.mean(fp):.2} fn {np.mean(fn):.2f}')
 
 
 

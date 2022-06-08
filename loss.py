@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 
 from util import BezierSampler, HungarianMatcher, cubic_bezier_curve_segment
+from torchvision.ops import sigmoid_focal_loss
 
 
 class HungarianBezierLoss(nn.Module):
@@ -58,9 +59,6 @@ class HungarianBezierLoss(nn.Module):
         return total_loss, {'classification_loss': classification_loss, 'curve_loss': curve_loss, 'segmentation_loss': segmentation_loss}
 
     def compute_curve_loss(self, pred, target):
-        
-        if target.numel() == 0:
-            target = pred.clone().detach()
         loss = F.l1_loss(pred, target, reduction='none')
         
         normalizer = target.shape[0] * target.shape[1]
@@ -71,18 +69,19 @@ class HungarianBezierLoss(nn.Module):
         return loss
 
     def compute_classification_loss(self, pred, target):
-        return F.binary_cross_entropy_with_logits(pred, target, pos_weight=self.pos_weight, reduction=self.reduction) / self.pos_weight
+        return sigmoid_focal_loss(pred, target, reduction=self.reduction) 
+        # return F.binary_cross_entropy_with_logits(pred, target, pos_weight=self.pos_weight, reduction=self.reduction) / self.pos_weight
 
     def compute_segmentation_loss(self, pred, target):
         # Process inputs
-        pred = torch.nn.functional.interpolate(pred, size=target.shape[-2:], mode='bilinear', align_corners=True).squeeze(1)
+        pred = F.interpolate(pred, size=target.shape[-2:], mode='bilinear', align_corners=True).squeeze(1)
 
         # Process targets
-        valid_map = (targets != self.ignore_index)
-        targets[~valid_map] = 0
-        targets = targets.float()
+        valid_map = (target != self.ignore_index)
+        target[~valid_map] = 0
+        target = target.float()
 
-        return (F.binary_cross_entropy_with_logits(pred, target, pos_weight=self.pos_weight, reduction='none') / self.pos_weight * valid_map).mean()
+        return (F.binary_cross_entropy_with_logits(pred, target, pos_weight=self.pos_weight_seg, reduction='none') / self.pos_weight_seg * valid_map).mean()
 
         
 

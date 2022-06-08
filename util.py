@@ -78,35 +78,20 @@ class BezierSampler(object):
             self.bernstein_matrix = self.bernstein_matrix.to(keypoints.device)
 
         return upcast(self.bernstein_matrix).matmul(upcast(keypoints))
-        """
-        
-        
-        n = len(keypoints)
-        t = np.linspace(0.0, 1.0, self.num_points)
-        polynomial_array = torch.from_numpy(np.array([[self.bernstein_poly(n - 1, ti, k) for k in range(n)] for ti in t])).float()
-        
-        
-        points = torch.matmul(polynomial_array, keypoints)
-        return points
-        """
 
-    def quick_sample_point(self, control_points, image_size=None):
-        sample_points = self.bernstein_matrix.cpu().numpy().dot(np.array(control_points))
-        if image_size is not None:
-            sample_points[:, 0] = sample_points[:, 0] * image_size[-1]
-            sample_points[:, -1] = sample_points[:, -1] * image_size[0]
-        return sample_points
-        
+
     def bezier_to_coordinates(self, control_points, existence, resize_shape, ppl=56, gap=10):
         # control_points: L x N x 2
         H, W = resize_shape
-        cps_of_lanes = [control_points[i].tolist() for i in range(len(existence)) if existence[i]]
         coordinates = []
-        for cps_of_lane in cps_of_lanes:
+        for i in range(len(existence)):
+            if not existence[i]:
+                continue
+
             # Find x for TuSimple's fixed y eval positions (suboptimal)
             bezier_threshold = 5.0 / H
             h_samples = np.array([1.0 - (ppl - i) * gap / H for i in range(ppl)], dtype=np.float32)
-            sampled_points = self.quick_sample_point(cps_of_lane, image_size=None)
+            sampled_points = self.bernstein_matrix.cpu().numpy().dot(control_points[i]) 
             temp = []
             dis = np.abs(np.expand_dims(h_samples, -1) - sampled_points[:, 1])
             idx = np.argmin(dis, axis=-1)
@@ -211,8 +196,7 @@ def cubic_bezier_curve_segment(control_points, sample_points):
                                        2 * t0 * t1 * u1 + t1 ** 2 * u0,
                                        3 * t1 ** 2 * u1], dim=-1),
                           torch.stack([t0 ** (3 - i) * t1 ** i for i in range(4)], dim=-1)]
-    transform_matrix = torch.stack(transform_matrix_c, dim=-2).transpose(-2, -1)  # B x 4 x 4, f**k this!
-    transform_matrix = transform_matrix.unsqueeze(1).expand(B, 2, 4, 4)
+    transform_matrix = torch.stack(transform_matrix_c, dim=-2).transpose(-2, -1).unsqueeze(1).expand(B, 2, 4, 4)
 
     # Matrix multiplication
     res = transform_matrix.matmul(control_points.permute(0, 2, 1).unsqueeze(-1))  # B x 2 x 4 x 1
@@ -240,27 +224,24 @@ class HungarianMatcher(object):
         target_sample_points = self.bezier_sampler.sample_points(target_keypoints)
 
         G, _ = target_keypoints.shape[:2]
-        out_prob = logits.sigmoid()  # B x Q
-        out_lane = curves  # B x Q x N x 2
         sizes = [target['keypoints'].shape[0] for target in targets]
 
         # 1. Local maxima prior
-        _, max_indices = torch.nn.functional.max_pool1d(out_prob.unsqueeze(1),
+        _, max_indices = torch.nn.functional.max_pool1d(logits.unsqueeze(1),
                                                         kernel_size=self.k, stride=1,
                                                         padding=(self.k - 1) // 2, return_indices=True)
         max_indices = max_indices.squeeze(1)  # B x Q
-        indices = torch.arange(0, Q, dtype=out_prob.dtype, device=out_prob.device).unsqueeze(0).expand_as(max_indices)
+        indices = torch.arange(0, Q, dtype=logits.dtype, device=logits.device).unsqueeze(0).expand_as(max_indices)
         local_maxima = (max_indices == indices).flatten().unsqueeze(-1).expand(-1, G)  # BQ x G
 
         # Safe reshape
-        out_prob = out_prob.flatten()  # BQ
-        out_lane = out_lane.flatten(end_dim=1)  # BQ x N x 2
+        out_lane = curves.flatten(end_dim=1)  # BQ x N x 2
 
         # 2. Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - prob[target class].
         # Then 1 can be omitted due to it is only a constant.
         # For binary classification, it is just prob (understand this prob as objectiveness in OD)
-        cost_label = out_prob.unsqueeze(-1).expand(-1, G)  # BQ x G
+        cost_label = logits.flatten().unsqueeze(-1).expand(-1, G)  # BQ x G
 
         # 3. Compute the curve sampling cost
         cost_curve = 1 - torch.cdist(self.bezier_sampler.sample_points(out_lane).flatten(start_dim=-2),

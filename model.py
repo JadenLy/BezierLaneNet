@@ -187,7 +187,7 @@ class BenizerNet(nn.Module):
         for model in self.regression_head:
             x = model(x)
 
-        logits = self.proj_classification(x).squeeze(1)
+        logits = self.proj_classification(x).squeeze(1).sigmoid()
         curves = self.proj_regression(x).permute(0, 2, 1)
         curves = curves.reshape(curves.shape[0], -1, curves.shape[-1] // 2, 2).contiguous()
 
@@ -197,7 +197,7 @@ class BenizerNet(nn.Module):
     @torch.no_grad()
     def infer(self, input, max_lane=5, gap=10, points=56):
         pred = self.forward(input)
-        pred_conf = pred[0].sigmoid() 
+        pred_conf = pred[0]
         pred_select = pred_conf > self.thresh
 
         _, max_indices = torch.nn.functional.max_pool1d(pred_conf.unsqueeze(1),
